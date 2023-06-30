@@ -4,6 +4,7 @@ const request = require("superagent");
 const { WebSocket } = require("ws");
 const helmet = require("helmet");
 const session = require("express-session");
+const { ClientSocket } = require("./common");
 
 describe("middlewares", () => {
   it("should apply middleware (polling)", (done) => {
@@ -244,6 +245,76 @@ describe("middlewares", () => {
 
       socket.on("open", () => {
         socket.close();
+      });
+    });
+  });
+
+  it("should fail on errors (polling)", (done) => {
+    const engine = listen((port) => {
+      engine.use((req, res, next) => {
+        next(new Error("will always fail"));
+      });
+
+      request
+        .get(`http://localhost:${port}/engine.io/`)
+        .query({ EIO: 4, transport: "polling" })
+        .end((err, res) => {
+          expect(err).to.be.an(Error);
+          expect(res.status).to.eql(400);
+
+          if (engine.httpServer) {
+            engine.httpServer.close();
+          }
+          done();
+        });
+    });
+
+    it("should fail on errors (websocket)", (done) => {
+      const engine = listen((port) => {
+        engine.use((req, res, next) => {
+          next(new Error("will always fail"));
+        });
+
+        engine.on("connection", () => {
+          done(new Error("should not connect"));
+        });
+
+        const socket = new WebSocket(
+          `ws://localhost:${port}/engine.io/?EIO=4&transport=websocket`
+        );
+
+        socket.addEventListener("error", () => {
+          if (engine.httpServer) {
+            engine.httpServer.close();
+          }
+          done();
+        });
+      });
+    });
+  });
+
+  it("should not be receiving data when getting a message longer than maxHttpBufferSize when polling (with a middleware)", (done) => {
+    const opts = {
+      allowUpgrades: false,
+      transports: ["polling"],
+      maxHttpBufferSize: 5,
+    };
+    const engine = listen(opts, (port) => {
+      engine.use((req, res, next) => {
+        next();
+      });
+
+      const socket = new ClientSocket(`ws://localhost:${port}`);
+      engine.on("connection", (conn) => {
+        conn.on("message", () => {
+          done(new Error("Test invalidation (message is longer than allowed)"));
+        });
+      });
+      socket.on("open", () => {
+        socket.send("aasdasdakjhasdkjhasdkjhasdkjhasdkjhasdkjhasdkjha");
+      });
+      socket.on("close", (reason) => {
+        done();
       });
     });
   });

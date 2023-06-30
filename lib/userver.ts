@@ -70,29 +70,34 @@ export class uServer extends BaseServer {
     (app as TemplatedApp)
       .any(path, this.handleRequest.bind(this))
       //
-      .ws(path, {
+      .ws<{ transport: any }>(path, {
         compression: options.compression,
         idleTimeout: options.idleTimeout,
         maxBackpressure: options.maxBackpressure,
         maxPayloadLength: this.opts.maxHttpBufferSize,
         upgrade: this.handleUpgrade.bind(this),
         open: (ws) => {
-          ws.transport.socket = ws;
-          ws.transport.writable = true;
-          ws.transport.emit("drain");
+          const transport = ws.getUserData().transport;
+          transport.socket = ws;
+          transport.writable = true;
+          transport.emit("drain");
         },
         message: (ws, message, isBinary) => {
-          ws.transport.onData(
+          ws.getUserData().transport.onData(
             isBinary ? message : Buffer.from(message).toString()
           );
         },
         close: (ws, code, message) => {
-          ws.transport.onClose(code, message);
+          ws.getUserData().transport.onClose(code, message);
         },
       });
   }
 
-  override _applyMiddlewares(req: any, res: any, callback: () => void): void {
+  override _applyMiddlewares(
+    req: any,
+    res: any,
+    callback: (err?: any) => void
+  ): void {
     if (this.middlewares.length === 0) {
       return callback();
     }
@@ -100,12 +105,12 @@ export class uServer extends BaseServer {
     // needed to buffer headers until the status is computed
     req.res = new ResponseWrapper(res);
 
-    super._applyMiddlewares(req, req.res, () => {
+    super._applyMiddlewares(req, req.res, (err) => {
       // some middlewares (like express-session) wait for the writeHead() call to flush their headers
       // see https://github.com/expressjs/session/blob/1010fadc2f071ddf2add94235d72224cf65159c6/index.js#L220-L244
       req.res.writeHead();
 
-      callback();
+      callback(err);
     });
   }
 
@@ -118,28 +123,34 @@ export class uServer extends BaseServer {
 
     req.res = res;
 
-    this._applyMiddlewares(req, res, () => {
-      this.verify(req, false, (errorCode, errorContext) => {
-        if (errorCode !== undefined) {
-          this.emit("connection_error", {
-            req,
-            code: errorCode,
-            message: Server.errorMessages[errorCode],
-            context: errorContext,
-          });
-          this.abortRequest(req.res, errorCode, errorContext);
-          return;
-        }
+    const callback = (errorCode, errorContext) => {
+      if (errorCode !== undefined) {
+        this.emit("connection_error", {
+          req,
+          code: errorCode,
+          message: Server.errorMessages[errorCode],
+          context: errorContext,
+        });
+        this.abortRequest(req.res, errorCode, errorContext);
+        return;
+      }
 
-        if (req._query.sid) {
-          debug("setting new request for existing client");
-          this.clients[req._query.sid].transport.onRequest(req);
-        } else {
-          const closeConnection = (errorCode, errorContext) =>
-            this.abortRequest(res, errorCode, errorContext);
-          this.handshake(req._query.transport, req, closeConnection);
-        }
-      });
+      if (req._query.sid) {
+        debug("setting new request for existing client");
+        this.clients[req._query.sid].transport.onRequest(req);
+      } else {
+        const closeConnection = (errorCode, errorContext) =>
+          this.abortRequest(res, errorCode, errorContext);
+        this.handshake(req._query.transport, req, closeConnection);
+      }
+    };
+
+    this._applyMiddlewares(req, res, (err) => {
+      if (err) {
+        callback(Server.errors.BAD_REQUEST, { name: "MIDDLEWARE_FAILURE" });
+      } else {
+        this.verify(req, false, callback);
+      }
     });
   }
 
@@ -154,63 +165,69 @@ export class uServer extends BaseServer {
 
     req.res = res;
 
-    this._applyMiddlewares(req, res, () => {
-      this.verify(req, true, async (errorCode, errorContext) => {
-        if (errorCode) {
-          this.emit("connection_error", {
-            req,
-            code: errorCode,
-            message: Server.errorMessages[errorCode],
-            context: errorContext,
-          });
-          this.abortRequest(res, errorCode, errorContext);
+    const callback = async (errorCode, errorContext) => {
+      if (errorCode !== undefined) {
+        this.emit("connection_error", {
+          req,
+          code: errorCode,
+          message: Server.errorMessages[errorCode],
+          context: errorContext,
+        });
+        this.abortRequest(res, errorCode, errorContext);
+        return;
+      }
+
+      const id = req._query.sid;
+      let transport;
+
+      if (id) {
+        const client = this.clients[id];
+        if (!client) {
+          debug("upgrade attempt for closed client");
+          res.close();
+        } else if (client.upgrading) {
+          debug("transport has already been trying to upgrade");
+          res.close();
+        } else if (client.upgraded) {
+          debug("transport had already been upgraded");
+          res.close();
+        } else {
+          debug("upgrading existing transport");
+          transport = this.createTransport(req._query.transport, req);
+          client.maybeUpgrade(transport);
+        }
+      } else {
+        transport = await this.handshake(
+          req._query.transport,
+          req,
+          (errorCode, errorContext) =>
+            this.abortRequest(res, errorCode, errorContext)
+        );
+        if (!transport) {
           return;
         }
+      }
 
-        const id = req._query.sid;
-        let transport;
+      // calling writeStatus() triggers the flushing of any header added in a middleware
+      req.res.writeStatus("101 Switching Protocols");
 
-        if (id) {
-          const client = this.clients[id];
-          if (!client) {
-            debug("upgrade attempt for closed client");
-            res.close();
-          } else if (client.upgrading) {
-            debug("transport has already been trying to upgrade");
-            res.close();
-          } else if (client.upgraded) {
-            debug("transport had already been upgraded");
-            res.close();
-          } else {
-            debug("upgrading existing transport");
-            transport = this.createTransport(req._query.transport, req);
-            client.maybeUpgrade(transport);
-          }
-        } else {
-          transport = await this.handshake(
-            req._query.transport,
-            req,
-            (errorCode, errorContext) =>
-              this.abortRequest(res, errorCode, errorContext)
-          );
-          if (!transport) {
-            return;
-          }
-        }
+      res.upgrade(
+        {
+          transport,
+        },
+        req.getHeader("sec-websocket-key"),
+        req.getHeader("sec-websocket-protocol"),
+        req.getHeader("sec-websocket-extensions"),
+        context
+      );
+    };
 
-        // calling writeStatus() triggers the flushing of any header added in a middleware
-        req.res.writeStatus("101 Switching Protocols");
-
-        res.upgrade(
-          {
-            transport,
-          },
-          req.getHeader("sec-websocket-key"),
-          req.getHeader("sec-websocket-protocol"),
-          req.getHeader("sec-websocket-extensions"),
-          context
-        );
-      });
+    this._applyMiddlewares(req, res, (err) => {
+      if (err) {
+        callback(Server.errors.BAD_REQUEST, { name: "MIDDLEWARE_FAILURE" });
+      } else {
+        this.verify(req, true, callback);
+      }
     });
   }
 
@@ -242,6 +259,7 @@ export class uServer extends BaseServer {
 class ResponseWrapper {
   private statusWritten: boolean = false;
   private headers = [];
+  private isAborted = false;
 
   constructor(readonly res: HttpResponse) {}
 
@@ -275,12 +293,17 @@ class ResponseWrapper {
   public getHeader() {}
 
   public writeStatus(status: string) {
+    if (this.isAborted) return;
+
     this.res.writeStatus(status);
     this.statusWritten = true;
     this.writeBufferedHeaders();
+    return this;
   }
 
   public writeHeader(key: string, value: string) {
+    if (this.isAborted) return;
+
     if (key === "Content-Length") {
       // the content length is automatically added by uWebSockets.js
       return;
@@ -299,18 +322,36 @@ class ResponseWrapper {
   }
 
   public end(data) {
-    if (!this.statusWritten) {
-      // status will be inferred as "200 OK"
-      this.writeBufferedHeaders();
-    }
-    this.res.end(data);
+    if (this.isAborted) return;
+
+    this.res.cork(() => {
+      if (!this.statusWritten) {
+        // status will be inferred as "200 OK"
+        this.writeBufferedHeaders();
+      }
+      this.res.end(data);
+    });
   }
 
   public onData(fn) {
+    if (this.isAborted) return;
+
     this.res.onData(fn);
   }
 
   public onAborted(fn) {
-    this.res.onAborted(fn);
+    if (this.isAborted) return;
+
+    this.res.onAborted(() => {
+      // Any attempt to use the UWS response object after abort will throw!
+      this.isAborted = true;
+      fn();
+    });
+  }
+
+  public cork(fn) {
+    if (this.isAborted) return;
+
+    this.res.cork(fn);
   }
 }

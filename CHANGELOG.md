@@ -2,6 +2,9 @@
 
 ## 2023
 
+- [6.5.1](#651-2023-06-27) (Jun 2023)
+- [6.5.0](#650-2023-06-16) (Jun 2023)
+- [6.4.2](#642-2023-05-02) (May 2023)
 - [6.4.1](#641-2023-02-20) (Feb 2023)
 - [6.4.0](#640-2023-02-06) (Feb 2023)
 - [6.3.1](#631-2023-01-12) (Jan 2023)
@@ -45,6 +48,143 @@
 
 
 # Release notes
+
+## [6.5.1](https://github.com/socketio/engine.io/compare/6.5.0...6.5.1) (2023-06-27)
+
+
+### Bug Fixes
+
+* prevent crash when accessing TextDecoder ([#684](https://github.com/socketio/engine.io/issues/684)) ([6dd2bc4](https://github.com/socketio/engine.io/commit/6dd2bc4f68edd7575c3844ae8ceadde649be95b2))
+
+
+### Credits
+
+Huge thanks to [@iowaguy](https://github.com/iowaguy) for helping!
+
+
+### Dependencies
+
+- [`ws@~8.11.0`](https://github.com/websockets/ws/releases/tag/8.11.0) (no change)
+
+
+
+## [6.5.0](https://github.com/socketio/engine.io/compare/6.4.2...6.5.0) (2023-06-16)
+
+
+### Bug Fixes
+
+* **uws:** discard any write to an aborted uWS response ([#682](https://github.com/socketio/engine.io/issues/682)) ([3144d27](https://github.com/socketio/engine.io/commit/3144d274584ae3b96cca4e609c66c56d534f1715))
+
+
+### Features
+
+#### Support for WebTransport
+
+The Engine.IO server can now use WebTransport as the underlying transport.
+
+WebTransport is a web API that uses the HTTP/3 protocol as a bidirectional transport. It's intended for two-way communications between a web client and an HTTP/3 server.
+
+References:
+
+- https://w3c.github.io/webtransport/
+- https://developer.mozilla.org/en-US/docs/Web/API/WebTransport
+- https://developer.chrome.com/articles/webtransport/
+
+Until WebTransport support lands [in Node.js](https://github.com/nodejs/node/issues/38478), you can use the `@fails-components/webtransport` package:
+
+```js
+import { readFileSync } from "fs";
+import { createServer } from "https";
+import { Server } from "engine.io";
+import { Http3Server } from "@fails-components/webtransport";
+
+// WARNING: the total length of the validity period MUST NOT exceed two weeks (https://w3c.github.io/webtransport/#custom-certificate-requirements)
+const cert = readFileSync("/path/to/my/cert.pem");
+const key = readFileSync("/path/to/my/key.pem");
+
+const httpsServer = createServer({
+  key,
+  cert
+});
+
+httpsServer.listen(3000);
+
+const engine = new Server({
+  transports: ["polling", "websocket", "webtransport"] // WebTransport is not enabled by default
+});
+
+engine.attach(httpsServer);
+
+const h3Server = new Http3Server({
+  port: 3000,
+  host: "0.0.0.0",
+  secret: "changeit",
+  cert,
+  privKey: key,
+});
+
+(async () => {
+  const stream = await h3Server.sessionStream("/engine.io/");
+  const sessionReader = stream.getReader();
+
+  while (true) {
+    const { done, value } = await sessionReader.read();
+    if (done) {
+      break;
+    }
+    engine.onWebTransportSession(value);
+  }
+})();
+
+h3Server.startServer();
+```
+
+Added in [123b68c](https://github.com/socketio/engine.io/commit/123b68c04f9e971f59b526e0f967a488ee6b0116).
+
+
+### Credits
+
+Huge thanks to [@OxleyS](https://github.com/OxleyS) for helping!
+
+
+### Dependencies
+
+- [`ws@~8.11.0`](https://github.com/websockets/ws/releases/tag/8.11.0) (no change)
+
+
+
+## [6.4.2](https://github.com/socketio/engine.io/compare/6.4.1...6.4.2) (2023-05-02)
+
+:warning: This release contains an important security fix :warning:
+
+A malicious client could send a specially crafted HTTP request, triggering an uncaught exception and killing the Node.js process:
+
+```
+TypeError: Cannot read properties of undefined (reading 'handlesUpgrades')
+  at Server.onWebSocket (build/server.js:515:67)
+```
+
+Please upgrade as soon as possible.
+
+
+### Bug Fixes
+
+* include error handling for Express middlewares ([#674](https://github.com/socketio/engine.io/issues/674)) ([9395782](https://github.com/socketio/engine.io/commit/93957828be1252c83275b56f0c7c0bd145a0ceb9))
+* prevent crash when provided with an invalid query param ([fc480b4](https://github.com/socketio/engine.io/commit/fc480b4f305e16fe5972cf337d055e598372dc44))
+* **typings:** make clientsCount public ([#675](https://github.com/socketio/engine.io/issues/675)) ([bd6d471](https://github.com/socketio/engine.io/commit/bd6d4713b02ff646c581872cd9ffe753acff0d73))
+* **uws:** prevent crash when using with middlewares ([8b22162](https://github.com/socketio/engine.io/commit/8b2216290330b174c9e67be32765bec0c74769f9))
+
+
+### Credits
+
+Huge thanks to [@tyilo](https://github.com/tyilo) and [@cieldeville](https://github.com/cieldeville) for helping!
+
+
+### Dependencies
+
+- [`ws@~8.11.0`](https://github.com/websockets/ws/releases/tag/8.11.0) (no change)
+
+
 
 ## [6.4.1](https://github.com/socketio/engine.io/compare/6.4.0...6.4.1) (2023-02-20)
 
